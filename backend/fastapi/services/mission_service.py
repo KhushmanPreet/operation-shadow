@@ -1,13 +1,17 @@
-"""Mission lifecycle and replay service wrapping the in-process ULTRON stub (§3, §4, §7).
+"""Mission lifecycle and replay service connected to the in-process ULTRON engine (§3, §4, §7).
 
-Uses `UltronAgentPort` (`StubUltronAgent`) for explicitly simulated mission creation
-and task decomposition, persists `Mission`, `Task`, `Event`, and `ReasoningTrace`
-records to SQLite, and broadcasts live updates over `DashboardGateway`.
+Uses `UltronAgentPort` (`UltronEngineAdapter` backed by the root `ultron` package by default,
+or `StubUltronAgent` when explicitly injected in isolated unit tests) for mission creation,
+task decomposition, dynamic hazard/target replanning, and full simulation execution.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import sys
+from typing import TYPE_CHECKING
+import uuid
 
 from core.errors import ResourceNotFoundError
 from db.models import Event, Mission, ReasoningTrace, Task
@@ -23,11 +27,23 @@ from schemas.entities import (
 )
 from schemas.enums import EventCategoryEnum, MissionStatusEnum
 from services.event_service import EventService, event_service
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from ultron_stub import StubUltronAgent, UltronAgentPort
+from ultron_stub import (
+    ObservationPayloadStub,
+    UltronAgentPort,
+    UltronEngineAdapter,
+    VehicleId,
+)
 from websocket.dashboard_gateway import DashboardGateway, dashboard_gateway
+
+if TYPE_CHECKING:
+    from services.vehicle_service import VehicleService
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 
 class MissionService:
@@ -40,7 +56,9 @@ class MissionService:
         gateway: DashboardGateway | None = None,
         events: EventService | None = None,
     ) -> None:
-        self._agent: UltronAgentPort = agent if agent is not None else StubUltronAgent()
+        self._agent: UltronAgentPort = (
+            agent if agent is not None else UltronEngineAdapter()
+        )
         self._gateway: DashboardGateway = gateway or dashboard_gateway
         self._events: EventService = events or event_service
 
@@ -75,7 +93,7 @@ class MissionService:
         session: AsyncSession,
         request: MissionCreateRequest,
     ) -> MissionCreateResponse:
-        """Create a mission via ULTRON stub, persist records, and broadcast updates (§4, §7)."""
+        """Create a mission via ULTRON, persist records, and broadcast updates (§4, §7)."""
         mission_id = await self._next_mission_id(session)
         now = datetime.now(timezone.utc)
 
@@ -110,7 +128,7 @@ class MissionService:
 
         await session.commit()
 
-        # Persist and broadcast initial mission event and stub reasoning trace
+        # Persist and broadcast initial mission event and ULTRON reasoning trace
         await self._events.record_event(
             session,
             mission_id=mission_id,
@@ -207,7 +225,7 @@ class MissionService:
                     timestamp=rt_read.timestamp,
                     reasoning_trace=rt_read,
                     world_model_snapshot={
-                        "is_stub": True,
+                        "is_stub": self._agent.is_stub_implementation(),
                         "resulting_task_ids": list(rt_read.resulting_task_ids),
                     },
                 )
@@ -274,6 +292,136 @@ class MissionService:
         await self._gateway.broadcast_mission_status(detail)
         return detail
 
+    async def execute_ultron_simulation(
+        self,
+        session: AsyncSession,
+        mission_id: str,
+        vehicle_svc: VehicleService,
+    ) -> MissionDetailRead:
+        """Run the full ULTRON mission execution, hazard replanning, and target discovery pipeline."""
+        from ultron.simulation.generator import SyntheticDataGenerator
+
+        stmt = (
+            select(Mission)
+            .where(Mission.id == mission_id)
+            .options(selectinload(Mission.tasks))
+        )
+        mission_row = (await session.execute(stmt)).scalar_one_or_none()
+        if mission_row is None:
+            raise ResourceNotFoundError("Mission", mission_id)
+
+        # 1. Connect simulated vehicles and begin task execution
+        await vehicle_svc.connect_vehicle(session, "SCOUT01")
+        await vehicle_svc.connect_vehicle(session, "HAWK01")
+
+        sim = vehicle_svc.simulator
+        sim.scout.set_target_position(5.1, 3.0)
+        sim.hawk.set_target_position(12.0, 4.0, alt=2.0)
+
+        for _ in range(3):
+            beats = await sim.step_all()
+            for beat in beats.values():
+                if beat is not None:
+                    await vehicle_svc.ingest_telemetry(session, beat, force_persist=True)
+
+        # 2. Generate synthetic hazard from HAWK01 using the friend's SyntheticDataGenerator
+        generator = SyntheticDataGenerator(hazard_delay_sec=0.0)
+        if isinstance(self._agent, UltronEngineAdapter):
+            world = self._agent.world_model
+        else:
+            from ultron.schemas.world import MissionState, WorldModel
+
+            world = WorldModel(
+                mission=MissionState(id=mission_id, objective=mission_row.objective)
+            )
+
+        hazard_obs_list = generator.generate_telemetry(world)
+        for u_obs in hazard_obs_list:
+            src_vid = getattr(u_obs.source_vehicle, "value", str(u_obs.source_vehicle))
+            vid_literal: VehicleId = "HAWK01" if src_vid == "HAWK01" else "SCOUT01"
+            obs_stub = ObservationPayloadStub(
+                observation_id=f"{mission_id}-OBS-{uuid.uuid4().hex[:6].upper()}",
+                mission_id=mission_id,
+                vehicle_id=vid_literal,
+                obs_type=u_obs.event,
+                confidence=u_obs.confidence,
+                location_x=u_obs.location.x,
+                location_y=u_obs.location.y,
+                raw={
+                    "temp_c": u_obs.temperature,
+                    "gas_level": u_obs.gas_level,
+                    "visual_evidence": u_obs.visual_evidence,
+                },
+            )
+            await vehicle_svc.record_observation(session, obs_stub)
+
+        # 3. If UltronEngineAdapter produced a replanned task set, persist & broadcast it
+        if isinstance(self._agent, UltronEngineAdapter):
+            replan = self._agent.last_replan_outcome
+            if replan is not None and replan.replanned and replan.tasks:
+                await session.execute(
+                    delete(Task).where(Task.mission_id == mission_id)
+                )
+                new_task_ids: list[str] = []
+                for spec in replan.tasks:
+                    t_row = Task(
+                        id=spec.task_id,
+                        mission_id=mission_id,
+                        vehicle_id=spec.vehicle_id,
+                        type=spec.task_type,
+                        area=spec.area,
+                        target=spec.target,
+                        priority=spec.priority,
+                        status="IN_PROGRESS",
+                    )
+                    session.add(t_row)
+                    new_task_ids.append(t_row.id)
+                await session.commit()
+
+                await self._events.record_event(
+                    session,
+                    mission_id=mission_id,
+                    category=EventCategoryEnum.OBSERVATION,
+                    message=f"ULTRON Replan Triggered: {replan.trigger_rationale}",
+                )
+                await self._events.record_reasoning_trace(
+                    session,
+                    mission_id=mission_id,
+                    trigger=replan.trigger_rationale or "ULTRON_REPLAN",
+                    rationale=replan.plan_rationale or "ULTRON replanned active tasks.",
+                    resulting_task_ids=new_task_ids,
+                )
+
+        # 4. Step vehicles to target location (8.4, 2.2) and inject target discovery (red_package)
+        sim.scout.set_target_position(8.4, 2.2)
+        sim.hawk.set_target_position(14.0, 9.0, alt=2.2)
+        for _ in range(3):
+            beats = await sim.step_all()
+            for beat in beats.values():
+                if beat is not None:
+                    await vehicle_svc.ingest_telemetry(session, beat, force_persist=True)
+
+        target_obs_list = generator.generate_telemetry(world)
+        for u_obs in target_obs_list:
+            src_vid = getattr(u_obs.source_vehicle, "value", str(u_obs.source_vehicle))
+            vid_target: VehicleId = "HAWK01" if src_vid == "HAWK01" else "SCOUT01"
+            obs_stub = ObservationPayloadStub(
+                observation_id=f"{mission_id}-OBS-{uuid.uuid4().hex[:6].upper()}",
+                mission_id=mission_id,
+                vehicle_id=vid_target,
+                obs_type=u_obs.event,
+                confidence=u_obs.confidence,
+                location_x=u_obs.location.x,
+                location_y=u_obs.location.y,
+                raw={
+                    "visual_evidence": u_obs.visual_evidence,
+                    "label": u_obs.visual_evidence,
+                },
+            )
+            await vehicle_svc.record_observation(session, obs_stub)
+
+        # 5. Finalize mission as COMPLETED and broadcast
+        return await self.complete_mission(session, mission_id)
+
 
 mission_service = MissionService()
-

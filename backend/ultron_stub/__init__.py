@@ -1,8 +1,8 @@
-"""Isolated ULTRON agent stub and deterministic vehicle simulation package.
+"""Isolated ULTRON agent bridge, development stub, and deterministic vehicle simulator.
 
-Provides explicit protocol interfaces, a locked real-hardware adapter guard,
-and a deterministic mock vehicle simulator until the ULTRON Agent Architecture,
-TRD v2.0, and Hardware & IoT specifications are provided.
+Provides explicit protocol interfaces, the live `UltronEngineAdapter` connecting
+to the root `ultron` package, a locked real-hardware adapter guard, and a
+deterministic mock vehicle simulator.
 """
 
 from ultron_stub.interface import (
@@ -28,6 +28,7 @@ from ultron_stub.simulator import (
     MockVehicleConfig,
 )
 from ultron_stub.stub_agent import StubUltronAgent
+from ultron_stub.ultron_bridge import UltronEngineAdapter, UltronReplanOutcome
 from ultron_stub.vehicle_adapter import (
     ClockPort,
     LockedRealVehicleAdapter,
@@ -58,6 +59,8 @@ __all__ = [
     "SystemClock",
     "TelemetryPayloadStub",
     "UltronAgentPort",
+    "UltronEngineAdapter",
+    "UltronReplanOutcome",
     "VehicleAdapterPort",
     "VehicleAdapterState",
     "VehicleCommandEnvelopeStub",

@@ -1,19 +1,18 @@
 # Operation Shadow — Assumptions, Missing Specifications & Provisional Decisions
 
-## 1. Available vs. Missing Source Documents
+## 1. Available Source Documents & Specification Status
 
-The repository currently contains one primary architecture specification and one UI design specification:
+The repository contains the authoritative specification documents:
 - **Present**: `docs/Operation Shadow — Backend & Frontend Architecture.md` (Version 1.0)
-  - *Note*: Referred to in project prompts as `docs/operation-shadow-architecture.md`; preserved under its original filename `docs/Operation Shadow — Backend & Frontend Architecture.md`.
+- **Present**: `docs/Operation Shadow — PRD v2.0.md` (Product Requirements Document v2.0)
+- **Present**: `docs/Operation Shadow — TRD v2.0.md` (Technical Requirements Document v2.0, including §26 Repository Structure)
+- **Present**: `docs/Operation Shadow — ULTRON Agent Architecture.md` (Version 1.0 Agent Architecture)
 - **Present**: `docs/ui-design-spec.md` (Military tactical command-and-control visual specification)
+- **Present**: `docs/implementation-plan.md` (Implementation milestones and verification criteria)
 
-The supplied architecture document references four companion documents that are **not currently available**:
-1. **PRD v2.0** (Product Requirements Document — referenced in §4, §8.5)
-2. **TRD v2.0** (Technical Requirements Document — referenced in §1, §3, §5.1, §6, §7, §21, §26, §27)
-3. **Hardware & IoT Architecture Document** (referenced in §5.1, §8.2, §8.3, §9, §10, §11)
-4. **ULTRON Agent Architecture Document** (referenced in §1, §4, §6, §10, §11, §13)
+The entire repository tree has been structured to adhere strictly to TRD v2.0 §26 (`ultron/`, `scout/`, `hawk/`, `firmware/esp32/`, `backend/fastapi/`, `dashboard/react/`, `configs/`, `tests/`, and `docs/`).
 
-Per project constraints, **no undocumented vehicle protocols, command schemas, hardware behaviors, or ULTRON planning logic are invented**. All unresolved contracts are isolated behind explicitly labeled stub interfaces (`backend/ultron_stub/` and `backend/fastapi/schemas/websocket.py`) so the real implementations can be integrated later without rewriting the application.
+Hardware & physical IoT wiring details (motor driver pinouts, companion computer USB/serial ports) remain isolated behind safety controllers, while all software wire frames, WebSocket topics, and safety protocols adhere to TRD v2.0 §7, §19, and §20. Real hardware control remains guarded by `SHADOW_HARDWARE_LOCKOUT=true`.
 
 ## 2. Approved Tooling & Architectural Decisions
 

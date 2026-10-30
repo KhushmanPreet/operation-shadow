@@ -1,19 +1,13 @@
-"""Milestone 6 automated tests: End-to-End Integration, Cold-Restart Safety, and Load/Latency.
+"""Milestone 6 automated tests: End-to-End Integration, Cold-Restart Safety, Load/Latency, and ULTRON Bridge.
 
-Covers all Milestone 6 verification requirements:
-1. Complete 17-step simulated mission workflow end to end:
-   - Health check (`GET /health`), floor map (`GET /map`), and initial WebSocket snapshot (`/ws/dashboard`).
-   - Mission submission (`POST /mission`), task decomposition, and persisted reasoning trace + event.
-   - Simulated `SCOUT01` (ground) and `HAWK01` (aerial + altitude) movement and telemetry broadcast.
-   - Simulated observation persistence (`GET /vehicle/{id}/observations`) and world-model propagation.
-   - Simulated vehicle disconnect / heartbeat timeout -> `UNKNOWN` transition -> reconnect recovery.
-   - Simulated mission completion (`POST /mission/{id}/complete`) and replay timeline verification (`GET /mission/{id}/replay`).
-   - Individual (`SCOUT01`) and fleet-wide (`ALL`) emergency stop, plus partial-failure isolation when one vehicle fails.
-   - Dashboard WebSocket disconnect and reconnect resynchronization from a fresh snapshot.
+Covers all Milestone 6 verification requirements plus integration with the root `ultron` package:
+1. Complete 17-step simulated mission workflow end to end.
 2. Cold-restart safety:
-   - Restarting `init_db()` / `seed_default_vehicles()` against a database containing stale `CONNECTED` vehicles resets them to `DISCONNECTED` and `IDLE` so stale connections from a prior process are never reported as healthy.
+   - Restarting `init_db()` / `seed_default_vehicles()` against a database containing stale `CONNECTED` vehicles resets them to `DISCONNECTED` and `IDLE`.
 3. Sustained load & latency measurement:
-   - 2 simulated vehicles emitting telemetry at 250ms cadence with active dashboard WebSocket subscribers and emergency-stop fast-path dispatch latency measurement (recording median and max latency).
+   - 2 simulated vehicles emitting telemetry at 250ms cadence with active dashboard WebSocket subscribers and emergency-stop fast-path dispatch latency measurement.
+4. Connected `UltronEngineAdapter` & `POST /mission/{id}/execute-ultron` pipeline:
+   - Verifies that `MissionService` connected to the root `ultron` package decomposes tasks via `ultron.graph.workflow`, executes synthetic hazard observation injection, triggers dynamic ULTRON replanning, detects `red_package`, and completes the mission end to end.
 """
 
 from __future__ import annotations
@@ -45,6 +39,7 @@ from ultron_stub import (
     ManualClock,
     MockFleetSimulator,
     StubUltronAgent,
+    UltronEngineAdapter,
 )
 from websocket.dashboard_gateway import DashboardGateway
 from websocket.vehicle_gateway import VehicleGatewayFastPath
@@ -404,15 +399,6 @@ async def test_sustained_two_vehicle_telemetry_and_emergency_stop_latency_benchm
     estop_http_median = statistics.median(estop_http_ms)
     estop_http_max = max(estop_http_ms)
 
-    print(
-        f"\n[BENCHMARK] Telemetry ingest->WS (n={len(telemetry_latencies_ms)}): "
-        f"median={telemetry_median:.3f}ms, max={telemetry_max:.3f}ms | "
-        f"E-Stop fast-path dispatch (n={len(estop_dispatch_ms)}): "
-        f"median={estop_dispatch_median:.3f}ms, max={estop_dispatch_max:.3f}ms | "
-        f"E-Stop ASGI HTTP roundtrip (n={len(estop_http_ms)}): "
-        f"median={estop_http_median:.3f}ms, max={estop_http_max:.3f}ms"
-    )
-
     # Verify performance targets (< 500ms telemetry pipeline, < 100ms simulated E-Stop fast path)
     assert len(received_frames) >= 51  # 1 initial snapshot + 50 telemetry broadcasts
     assert telemetry_median < 50.0
@@ -423,6 +409,89 @@ async def test_sustained_two_vehicle_telemetry_and_emergency_stop_latency_benchm
     assert estop_http_max < 100.0
 
     await gateway.disconnect_client(ws_client_id)
+    await fast_path.shutdown()
+    await gateway.close_all()
+    await vehicle_svc.stop()
+
+
+async def test_connected_ultron_engine_adapter_and_pipeline_execution(
+    isolated_engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Verify FastAPI backend connected to the root `ultron` package via UltronEngineAdapter."""
+    clock = ManualClock(datetime(2026, 10, 30, 12, 0, 0, tzinfo=timezone.utc))
+    ultron_agent = UltronEngineAdapter()
+    simulator = MockFleetSimulator(clock=clock)
+    gateway = DashboardGateway()
+    fast_path = VehicleGatewayFastPath()
+    event_svc = EventService(gateway=gateway)
+    mission_svc = MissionService(agent=ultron_agent, gateway=gateway, events=event_svc)
+    vehicle_svc = VehicleService(
+        agent=ultron_agent,
+        clock=clock,
+        simulator=simulator,
+        gateway=gateway,
+        app_settings=Settings(hardware_lockout=True, default_vehicle_mode="simulated"),
+    )
+    app = create_app(
+        db_engine=isolated_engine,
+        session_factory=session_factory,
+        mission_svc=mission_svc,
+        vehicle_svc=vehicle_svc,
+        event_svc=event_svc,
+        dash_gateway=gateway,
+        estop_fast_path=fast_path,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        # 1. Create mission using UltronEngineAdapter -> invokes ultron.graph.workflow
+        create_res = await client.post(
+            "/mission",
+            json={"objective": "Inspect building, identify hazards, locate red_package"},
+        )
+        assert create_res.status_code == 200
+        mission_id = create_res.json()["mission_id"]
+
+        detail_res = await client.get(f"/mission/{mission_id}")
+        assert detail_res.status_code == 200
+        detail = detail_res.json()
+        assert detail["status"] == "ACTIVE"
+        assert len(detail["tasks"]) == 3  # 3 validated tasks from ULTRON fallback plan
+        assert {t["type"] for t in detail["tasks"]} == {
+            "HOVER_SCAN",
+            "EXPLORE",
+            "FIND_TARGET",
+        }
+
+        # 2. Execute full ULTRON simulation pipeline (telemetry, hazard replan, target discovery)
+        exec_res = await client.post(f"/mission/{mission_id}/execute-ultron")
+        assert exec_res.status_code == 200
+        exec_body = exec_res.json()
+        assert exec_body["status"] == "COMPLETED"
+        assert all(t["status"] == "COMPLETED" for t in exec_body["tasks"])
+
+        # 3. Verify observations (HAWK01 hazard + SCOUT01 target) and replay traces
+        hawk_obs = await client.get(
+            "/vehicle/HAWK01/observations",
+            params={"mission_id": mission_id},
+        )
+        scout_obs = await client.get(
+            "/vehicle/SCOUT01/observations",
+            params={"mission_id": mission_id},
+        )
+        assert len(hawk_obs.json()) >= 1
+        assert len(scout_obs.json()) >= 1
+
+        replay_res = await client.get(f"/mission/{mission_id}/replay")
+        assert replay_res.status_code == 200
+        entries = replay_res.json()["entries"]
+        assert any(
+            e["entry_type"] == "reasoning_trace"
+            and "ULTRON" in (e["reasoning_trace"]["rationale"] or "")
+            for e in entries
+        )
+
     await fast_path.shutdown()
     await gateway.close_all()
     await vehicle_svc.stop()

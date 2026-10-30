@@ -30,7 +30,7 @@ async def create_mission_endpoint(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     service: Annotated[MissionService, Depends(get_mission_service)],
 ) -> MissionCreateResponse:
-    """Create a new mission via the in-process ULTRON stub and persist tasks (§7)."""
+    """Create a new mission via the in-process ULTRON engine and persist tasks (§7)."""
     return await service.create_mission(session, payload)
 
 
@@ -63,3 +63,18 @@ async def complete_mission_endpoint(
     """Complete an active simulated mission and finalize its tasks."""
     return await service.complete_mission(session, mission_id)
 
+
+@router.post("/{mission_id}/execute-ultron", response_model=MissionDetailRead)
+async def execute_ultron_simulation_endpoint(
+    mission_id: str,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    service: Annotated[MissionService, Depends(get_mission_service)],
+) -> MissionDetailRead:
+    """Execute the full ULTRON simulation loop (telemetry, hazard replan, target discovery)."""
+    from services.vehicle_service import VehicleService, vehicle_service
+
+    v_svc: VehicleService = (
+        getattr(request.app.state, "vehicle_service", None) or vehicle_service
+    )
+    return await service.execute_ultron_simulation(session, mission_id, v_svc)

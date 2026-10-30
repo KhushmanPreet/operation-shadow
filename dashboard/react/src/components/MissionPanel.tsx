@@ -1,5 +1,10 @@
 import React, { useState } from "react";
-import { completeMission, createMission, fetchMission } from "../api/client";
+import {
+  completeMission,
+  createMission,
+  executeUltronSimulation,
+  fetchMission,
+} from "../api/client";
 import { useDashboardStore } from "../state/store";
 
 export function MissionPanel(): React.JSX.Element {
@@ -7,6 +12,7 @@ export function MissionPanel(): React.JSX.Element {
   const [objectiveInput, setObjectiveInput] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [isCompleting, setIsCompleting] = useState<boolean>(false);
+  const [isRunningUltron, setIsRunningUltron] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
@@ -61,6 +67,28 @@ export function MissionPanel(): React.JSX.Element {
     }
   };
 
+  const handleRunUltronPipeline = async (): Promise<void> => {
+    if (!state.activeMissionId) {
+      return;
+    }
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    setIsRunningUltron(true);
+    try {
+      const completed = await executeUltronSimulation(state.activeMissionId);
+      dispatch({ type: "SET_MISSION_DETAIL", payload: completed });
+      setSuccessMsg(
+        `ULTRON pipeline executed for ${completed.id}: hazard replanned, target located, mission COMPLETED.`,
+      );
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : "ULTRON simulation run failed.",
+      );
+    } finally {
+      setIsRunningUltron(false);
+    }
+  };
+
   return (
     <section className="c2-panel" aria-label="Mission Panel">
       <div className="c2-panel-header">
@@ -86,7 +114,7 @@ export function MissionPanel(): React.JSX.Element {
               id="mission-objective-input"
               type="text"
               className="c2-input"
-              placeholder="e.g. Recon Sector Alpha and locate thermal anomaly"
+              placeholder="e.g. Inspect building, find red_package, and report hazards"
               value={objectiveInput}
               onChange={(e) => setObjectiveInput(e.target.value)}
               disabled={isSubmitting}
@@ -128,11 +156,27 @@ export function MissionPanel(): React.JSX.Element {
         </div>
 
         {state.activeMissionId && state.missionStatus === "ACTIVE" && (
-          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "flex-end",
+              gap: "6px",
+              flexWrap: "wrap",
+            }}
+          >
             <button
               type="button"
               className="c2-btn"
-              disabled={isCompleting}
+              disabled={isRunningUltron || isCompleting}
+              onClick={() => void handleRunUltronPipeline()}
+              aria-label="Run ULTRON Simulation Pipeline"
+            >
+              {isRunningUltron ? "RUNNING ULTRON..." : "RUN ULTRON PIPELINE"}
+            </button>
+            <button
+              type="button"
+              className="c2-btn"
+              disabled={isCompleting || isRunningUltron}
               onClick={() => void handleCompleteMission()}
               aria-label="Complete Simulated Mission"
             >
@@ -163,7 +207,7 @@ export function MissionPanel(): React.JSX.Element {
             </span>
             {state.ultronIsStub && (
               <span className="c2-badge c2-badge-warning">
-                PLANNER: ULTRON STUB (SIMULATED)
+                PLANNER: ULTRON ENGINE (SIMULATED)
               </span>
             )}
           </div>

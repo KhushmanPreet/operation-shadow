@@ -1,7 +1,7 @@
 [project]
 name = "operation-shadow-backend"
 version = "0.1.0"
-description = "Operation Shadow FastAPI service layer, SQLite persistence, WebSocket gateways, and ULTRON stub adapter"
+description = "Operation Shadow FastAPI service layer, SQLite persistence, WebSocket gateways, and ULTRON agent bridge"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0,<1.0.0",
@@ -9,7 +9,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.30,<3.0.0",
     "aiosqlite>=0.20.0,<1.0.0",
     "pydantic>=2.7.0,<3.0.0",
-    "pydantic-settings>=2.3.0,<3.0.0",
+    "pydantic-settings>=2.3.0,<1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -23,11 +23,18 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-pythonpath = ["fastapi", "."]
+pythonpath = ["fastapi", ".", ".."]
 
 [tool.mypy]
 python_version = "3.13"
-mypy_path = "fastapi:."
+mypy_path = "fastapi:.:.."
 strict = true
 explicit_package_bases = true
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["ultron", "ultron.*"]
+follow_imports = "silent"
+ignore_missing_imports = true
+disallow_untyped_defs = false
+disallow_untyped_calls = false

@@ -1,6 +1,6 @@
 /**
  * Typed REST API client and shared backend contracts for Operation Shadow.
- * Consumes the exact FastAPI contracts implemented in Milestones 1–4.
+ * Consumes the exact FastAPI contracts implemented in Milestones 1–6.
  */
 
 export const API_BASE_URL: string =
@@ -322,6 +322,17 @@ export async function completeMission(
 ): Promise<MissionDetailPayload> {
   return requestJson<MissionDetailPayload>(
     `/mission/${encodeURIComponent(missionId)}/complete`,
+    {
+      method: "POST",
+    },
+  );
+}
+
+export async function executeUltronSimulation(
+  missionId: string,
+): Promise<MissionDetailPayload> {
+  return requestJson<MissionDetailPayload>(
+    `/mission/${encodeURIComponent(missionId)}/execute-ultron`,
     {
       method: "POST",
     },
