@@ -18,10 +18,12 @@ from sqlalchemy.ext.asyncio import (
 
 
 def _enable_sqlite_foreign_keys(dbapi_connection: Any, _connection_record: Any) -> None:
-    """Ensure SQLite enforces FOREIGN KEY constraints on every connection."""
+    """Ensure SQLite enforces FOREIGN KEY constraints and WAL concurrency on every connection."""
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
     finally:
         cursor.close()
 
